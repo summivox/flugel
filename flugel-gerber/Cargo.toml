@@ -5,5 +5,3 @@ authors = ["summivox <summivox@gmail.com>"]
 
 [dependencies]
 num = "^0.1"
-pest = "^1.0.4"
-pest_derive = "^1.0"
