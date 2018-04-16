@@ -1,3 +1,0 @@
-number_sign = { "+" | "-" }
-digit = { '0'..'9' }
-integer = { number_sign? ~ digit+ }

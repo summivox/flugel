@@ -1,0 +1,199 @@
+use super::types::*;
+
+// NOTE on whitespace:
+//
+// - 0x20 is not allowed in input
+// - 0x10 and 0x13 are stripped from input before parsing
+
+
+////////////////////////////////////////
+// util
+
+// number literals
+
+int_u<T>
+    =   s:$([0-9]+) { s.parse().unwrap() }
+int_i<T>
+    =   s:$(("+"/"-")?[0-9]+) { s.parse().unwrap() }
+pub int_u8 -> u8 = int_u<u8>
+pub int_u16 -> u16 = int_u<u16>
+pub int_u32 -> u32 = int_u<u32>
+pub int_u64 -> u64 = int_u<u64>
+pub int_i8 -> i8 = int_i<i8>
+pub int_i16 -> i16 = int_i<i16>
+pub int_i32 -> i32 = int_i<i32>
+pub int_i64 -> i64 = int_i<i64>
+
+pub dec -> d128
+    =   s:$(("+"/"-")?[0-9]+("."[0-9]*)?) { s.parse().unwrap() }
+    /   s:$(("+"/"-")?"."[0-9]+) { s.parse().unwrap() }
+
+pub hex_str -> &'input str
+    =   $([0-9a-fA-F]+)
+pub hex_u8 -> u8 = s:hex_str { u8::from_str_radix(s, 16).unwrap() }
+pub hex_u16 -> u16 = s:hex_str { u16::from_str_radix(s, 16).unwrap() }
+pub hex_u32 -> u32 = s:hex_str { u32::from_str_radix(s, 16).unwrap() }
+pub hex_u64 -> u64 = s:hex_str { u64::from_str_radix(s, 16).unwrap() }
+
+// string literals
+
+pub name -> &'input str = $([a-zA-Z_.$][a-zA-Z_.0-9]*)
+pub string -> &'input str = $([^\r\n%*]+) // TODO: utf16 escapes
+pub field -> &'input str = $([^\r\n%*,]+) // TODO: utf16 escapes
+
+// corresponds to type aliases in `super::types`
+
+pub coord_raw -> CoordRaw = int_i64
+pub coord -> Coord = dec
+pub angle -> Angle = dec
+pub factor -> Factor = dec
+
+pub aperture_id -> ApertureId = int_u32;
+pub macro_var_id -> MacroVarId = int_u32;
+pub macro_primitive_id -> MacroPrimitiveId = int_u8;
+
+
+////////////////////////////////////////
+// commands
+
+pub command -> Command<'input>
+    =   c:command_op "*" {c}
+    /   "%" c:command_ex "*%" {c}
+    /   "%" c:command_am "%" {c}
+
+
+command_op -> Command<'input>
+    =   comment / g / d / d0
+
+comment -> Command<'input>
+    =   "G04" s:string { Comment(s) }
+
+g -> Command<'input>
+    =   "G" a:int_u8
+        {?
+            match a {
+                1 => Ok(Line),
+                2 => Ok(ArcCW),
+                3 => Ok(ArcCCW),
+                74 => Ok(ArcSingleQuadrant),
+                75 => Ok(ArcMultiQuadrant),
+                36 => Ok(RegionStart),
+                37 => Ok(RegionEnd),
+                _ => Err("invalid G code"),
+            }
+        }
+
+d -> Command<'input>
+    =   "D" a:int_u32 { ApertureSelect(a) }
+
+d0 -> Command<'input>
+    =   x:([Xx] x:coord_raw {x})?
+        y:([Yy] y:coord_raw {y})?
+        i:([Ii] i:coord_raw {i})?
+        j:([Jj] j:coord_raw {j})?
+        d:([Dd] d:int_u32 {d})
+        {?
+            (match d {
+                1 => Ok(Interpolate),
+                2 => Ok(Move),
+                3 => Ok(Flash),
+                _ => Err("invalid operation"),
+            }).map(|d| Operation{x, y, i, j, d})
+        }
+
+
+command_ex -> Command<'input>
+    =   fs / mo / sr / ab / ad
+
+fs -> Command<'input>
+    =   "FSLA" s:$("X"[0-9][0-9]"Y"[0-9][0-9])
+        {
+            let s = s.as_bytes();
+            Format{
+                xi: s[1] - '0' as u8,
+                xf: s[2] - '0' as u8,
+                yi: s[4] - '0' as u8,
+                yf: s[5] - '0' as u8,
+            }
+        }
+
+mo -> Command<'input> = "MO" x:mo_arg {x}
+mo_arg -> Command<'input>
+    =   "IN" { UnitInch }
+    /   "MM" { UnitMm }
+
+l -> Command<'input> = "L" x:l_arg {x}
+l_arg -> Command<'input>
+    =   "PD" { PolarityDark }
+    /   "PC" { PolarityClear }
+    /   "MN" { MirrorN }
+    /   "MX" { MirrorX }
+    /   "MY" { MirrorY }
+    /   "MXY" { MirrorXY }
+    /   "R" a:angle { Rotate(a) }
+    /   "S" f:factor { Scale(f) }
+
+sr -> Command<'input>
+    =   "SR"
+        "X" x:int_u32
+        "Y" y:int_u32
+        "I" i:coord
+        "J" j:coord
+        { StepRepeat{x, y, i, j} }
+    /   "SR"
+        { StepRepeatClear }
+
+
+ab -> Command<'input> = "AB" x:ab_arg {x}
+ab_arg -> Command<'input>
+    =   "D" id:int_u32 { ApertureBlock(id) }
+    /   ({ ApertureBlockClear })
+
+
+ad -> Command<'input>
+    =   "ADD" id:int_u32 macro_name:name
+        args:("," args:(coord ++ [Xx]) {args})?
+        {
+            ApertureDefine{
+                id,
+                macro_name,
+                args: args.unwrap_or(vec![]),
+            }
+        }
+
+
+command_am -> Command<'input>
+    =   "AM" name:name "*"
+        body:(s:am_stmt "*" {s})+
+        { ApertureMacro{name, body} }
+
+am_stmt -> MacroStmt<'input>
+    =   am_comment / am_assign / am_primitive
+
+am_comment -> MacroStmt<'input>
+    =   "0" s:string { MacroComment(s) }
+
+am_assign -> MacroStmt<'input>
+    =   l:am_var "=" r:am_expr { Assign(l, r) }
+
+am_primitive -> MacroStmt<'input>
+    =   p:macro_primitive_id
+        args:("," x:am_expr {x})*
+        { Primitive(p, args) }
+
+pub am_expr -> MacroExpr = #infix<am_atom> {
+	#L  x "+"  y { MacroExpr::Bin(BinOp::Add, Box::new(x), Box::new(y)) }
+	    x "-"  y { MacroExpr::Bin(BinOp::Sub, Box::new(x), Box::new(y)) }
+	#L  x [Xx] y { MacroExpr::Bin(BinOp::Mul, Box::new(x), Box::new(y)) }
+	    x "/"  y { MacroExpr::Bin(BinOp::Div, Box::new(x), Box::new(y)) }
+}
+
+am_atom -> MacroExpr
+    =   x:coord { MacroExpr::Lit(x) }
+    /   x:am_var { MacroExpr::Var(x) }
+    /   "-" x:am_atom { MacroExpr::Neg(Box::new(x)) }
+    /   "+" x:am_atom {x}
+    /   "(" x:am_expr ")" {x}
+
+am_var -> MacroVarId
+    =   "$" x:macro_var_id {x}

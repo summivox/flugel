@@ -5,3 +5,10 @@ authors = ["summivox <summivox@gmail.com>"]
 
 [dependencies]
 num = "^0.1"
+peg = "^0.5"
+decimal = "^2"
+extprim = "^1"
+extprim_literals = "^2"
+
+[build-dependencies]
+peg = "^0.5"
